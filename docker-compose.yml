@@ -1,0 +1,132 @@
+version: "3.3"
+
+services:
+  # postgresql
+  diia_postgresql:
+    image: postgres:13
+    container_name: diia_postgresql
+    restart: always
+    ports:
+      - 5442:5432
+    env_file:
+      - .env
+    volumes:
+      - diia_postgres_data:/var/lib/postgresql-docker/data
+    command: ["postgres", "-c", "log_min_duration_statement=1000", "-c", "log_destination=stderr"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  # RabbitMQ
+  diia_rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: diia_rabbitmq
+    restart: always
+    env_file:
+      - .env
+    ports:
+      - 5672:5672
+      - 15672:15672
+    volumes:
+      - rabbitmq_logs:/var/log/rabbitmq/
+    healthcheck:
+      test: rabbitmq-diagnostics -q ping
+      interval: 30s
+      timeout: 30s
+      retries: 3
+
+  # Redis
+  diia_redis:
+    image: redis
+    container_name: diia_redis
+    restart: always
+    env_file:
+      - .env
+    ports:
+      - 6379:6379
+    volumes:
+      - redis_data:/var/lib/redis
+    command: redis-server --appendonly yes --port 6379 --replica-read-only no
+    healthcheck:
+      test: redis-cli PING
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  # Django app
+  diia_django_app:
+    image: diia_django_app
+    container_name: diia_django_app
+    build:
+      context: .
+      dockerfile: docker/local/django/Dockerfile
+    env_file:
+      - .env
+    restart: always
+    ports:
+      - 8000:8000
+    links:
+      - diia_postgresql
+      - diia_redis
+      - diia_rabbitmq
+    depends_on:
+      diia_postgresql:
+        condition: service_healthy
+      diia_redis:
+        condition: service_healthy
+      diia_rabbitmq:
+        condition: service_healthy
+    command: /start
+    volumes:
+      - .:/code
+
+  # celery main
+  diia_celery_main:
+    container_name: diia_celery_main
+    image: diia_django_app
+    env_file:
+      - .env
+    restart: always
+    command: celery -A cnap_monitoring worker -E -l debug --autoscale=2,1 --logfile=logs/celery_main.log
+    links:
+      - diia_postgresql
+      - diia_redis
+      - diia_rabbitmq
+    depends_on:
+      diia_postgresql:
+        condition: service_healthy
+      diia_redis:
+        condition: service_healthy
+      diia_rabbitmq:
+        condition: service_healthy
+    volumes:
+      - .:/code
+
+  # celery beat
+  diia_celery_beat:
+    container_name: diia_celery_beat
+    image: diia_django_app
+    env_file:
+      - .env
+    restart: always
+    command: celery -A cnap_monitoring beat -l debug --logfile=logs/celery_beat.log
+    links:
+      - diia_postgresql
+      - diia_redis
+      - diia_rabbitmq
+    depends_on:
+      diia_postgresql:
+        condition: service_healthy
+      diia_redis:
+        condition: service_healthy
+      diia_rabbitmq:
+        condition: service_healthy
+    volumes:
+      - .:/code
+volumes:
+  diia_postgres_data:
+  redis_data:
+  rabbitmq_logs:
+  code:
